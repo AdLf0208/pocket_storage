@@ -1,0 +1,12 @@
+# Port-owned content mod for Pocket Storage 1.2.5 (slice 1: the tier-1 unit).
+# The item model, its texture and the lang entries are the upstream mod's own
+# assets (MIT; see ../LICENSE), carried from the pack's jar. Local-only until
+# the maintainer approves publishing (ARCHITECTURE.md §8).
+id = "pocketstorage"
+name = "Pocket Storage"
+version = "0.1.0"
+description = "A storage unit that carries its own inventory in the item"
+authors = ["Flanks255"]
+api = "0.2"
+side = "both"
+capabilities = ["registries"]

@@ -1,0 +1,11 @@
+{
+  "item.pocketstorage.psu_1": "Pocket Storage Unit Tier: 1",
+  "item.pocketstorage.psu_1.info": "Holds %s different items, up to %s of each.",
+  "item.pocketstorage.psu_1.info2": "Automatically absorbs like items",
+  "item.pocketstorage.psu_1.info3": "on pickup, voids excess.",
+  "pocketstorage.util.count": "Count ",
+  "pocketstorage.util.deposit": "%s a chest to deposit contents.",
+  "pocketstorage.util.sneak_left": "Sneak left-click",
+  "pocketstorage.util.sneak_right": "Sneak right-click",
+  "pocketstorage.util.withdraw": "%s a chest to withdraw matching contents."
+}

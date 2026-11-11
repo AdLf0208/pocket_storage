@@ -1,0 +1,49 @@
+id = "pocketstorage"
+kind = "native-mod"
+name = "pocketstorage"
+summary = "A Horizon port of pocketstorage."
+description = """
+A port of [pocketstorage](Flanks255/PocketStorage) for Horizon.
+
+**Implemented so far**
+
+- `pocketstorage:psu_1`** (`data/pocketstorage/horizon/item/psu_1.json`, the
+- `minecraft:iron_ingot` template with `max_stack_size: 1`), one of the four the
+- jar ships. Its model and texture are the jar's own.
+- slots of 255** — upstream's `PSUTier.TIER1` (`slots = 8`,
+- `capacity = 0xFF = 255`), repeated in its `README.MD` and in the jar's lang
+- (`Holds %s different items, up to %s of each.`). Insert tops up the slot
+- holding the same item, else takes the first empty slot, else refuses the
+- stack; a deposit sends **all but one** of each kind (upstream's `giveItems`
+
+**Not yet ported**
+
+- Tiers 2–4** (`psu_2` 16 × 4,095, `psu_3` 32 × 65,535, `psu_4` 64 ×
+- ,048,575): only the tier-1 item is carried; the runtime already holds all
+- four tiers' numbers, but the items, models/tabs and the upgrade path are not
+- shipped.
+- The upgrade recipe type** (`pocketstorage:upgrade`, a shaped recipe whose
+- `D` is the previous unit, with its `ShapedRecipe.pattern` access transformer):
+- the pin has no custom recipe type a port can register, so a tier-2..4 recipe
+- cannot be authored yet. The three upgrade recipes are a named gap.
+
+Original copyright and licence notices are kept in this repository. Pinned to
+Horizon 1d63e0a and horizon-mixins 5a64af93. Help with the remaining slices is
+welcome.
+"""
+authors = ["AdLf0208"]
+owners = ["AdLf0208"]
+owner_ids = [107615167]
+license = "MIT"
+source = "https://github.com/AdLf0208/pocketstorage"
+icon = "icons/pocketstorage.png"
+categories = ["utility"]
+tags = ["port", "horizon"]
+
+[[versions]]
+version = "0.1.0"
+published = "2026-11-10"
+game = "26.3"
+file = "pocketstorage.hnmod"
+sha256 = "78f4226ae1078376d01e7d7d5366df449fd58d1c4bb447b82f43ce21b9ddb38e"
+changelog = "First release"

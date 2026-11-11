@@ -1,0 +1,117 @@
+[mod]
+id = "pocketstorage"
+version = "0.1.0"
+priority = 100
+
+[compatibility]
+horizon_revision = "1d63e0a5a37a7a708eb0b32b49bf0dfeb28ed8a9"
+
+# The pure tier table and the slot arithmetic (standalone crate lib, injected as
+# `crate::game::pocketstorage`): the four tiers' capacities, insert, extract,
+# the deposit's all-but-one rule, the withdraw's held-only rule and `/psu`'s
+# parse.
+[[module]]
+id = "runtime"
+file = "crates/horizon-client/src/game.rs"
+name = "pocketstorage"
+source = "runtime.rs"
+
+# Game-side glue: the stack component, the container interop, the held-stack
+# write and its client sync, and the command fallback.
+[[module]]
+id = "state"
+file = "crates/horizon-client/src/game.rs"
+name = "pocketstorage_state"
+source = "support.rs"
+
+# The content half is inside this bundle (`data/pocketstorage-content.hmod`, the
+# built `content/pocketstorage.hmod`): this writes it to `.horizon-cache/` and
+# appends it to the dev-mod list, so one `.hnmod` installs the item and the
+# code. The registry keeps one file per project, so a split port could not be
+# listed; AE2 ships the same pattern.
+[[injection]]
+id = "embedded-content"
+kind = "HEAD"
+cancellable = true
+target = "horizon_client::game::mods::content_root"
+helper = "embedded_content.rs"
+bindings = [
+  { name = "root", ty = "&std::path::Path", value = "root" },
+  { name = "enabled", ty = "&std::collections::BTreeSet<String>", value = "enabled" },
+  { name = "dev", ty = "&[std::path::PathBuf]", value = "dev" },
+]
+
+# Before content loads: register `pocketstorage:contents` (API 65).
+[[injection]]
+id = "component-types"
+hook = "component_types"
+hook_version = 1
+kind = "HEAD"
+helper = "component_types.rs"
+bindings = [
+  { name = "types", ty = "&mut Vec<String>", value = "types" },
+]
+
+# A sneak right click on a container deposits the held unit's contents (API 21).
+[[injection]]
+id = "right-click-block"
+hook = "right_click_block"
+hook_version = 1
+kind = "HEAD"
+helper = "right_click_block.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "pos", ty = "[i32; 3]", value = "pos" },
+  { name = "face", ty = "[i32; 3]", value = "face" },
+  { name = "canceled", ty = "&mut bool", value = "canceled" },
+]
+
+# A sneak left click on a container withdraws the kinds the unit holds (API 30).
+[[injection]]
+id = "left-click-block"
+hook = "left_click_block"
+hook_version = 1
+kind = "HEAD"
+helper = "left_click_block.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "pos", ty = "[i32; 3]", value = "pos" },
+  { name = "face", ty = "[i32; 3]", value = "face" },
+  { name = "canceled", ty = "&mut bool", value = "canceled" },
+]
+
+# `/psu list|put|help`: the screen's insert/read half, for the slice (API 8).
+[[injection]]
+id = "register-commands"
+hook = "register_commands"
+hook_version = 1
+kind = "HEAD"
+helper = "register_commands.rs"
+bindings = [
+  { name = "commands", ty = "&mut Vec<NativeCommand>", value = "commands" },
+]
+
+[[injection]]
+id = "perform-command"
+hook = "perform_command"
+hook_version = 1
+kind = "HEAD"
+helper = "perform_command.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "player", ty = "&NativeServerPlayer", value = "player" },
+  { name = "command", ty = "&str", value = "command" },
+  { name = "ran", ty = "&mut bool", value = "ran" },
+]
+
+# End of a server tick: resend the inventory a held-stack write changed (API 44).
+[[injection]]
+id = "server-tick"
+hook = "server_tick"
+hook_version = 1
+kind = "HEAD"
+helper = "server_tick.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+  { name = "phase", ty = "ServerTickPhase", value = "phase" },
+]

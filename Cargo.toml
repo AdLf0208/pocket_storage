@@ -1,0 +1,14 @@
+[package]
+# Ported from: Pocket Storage 1.2.5 (Flanks255/PocketStorage, MIT),
+# Minecraft Java 1.21.1 NeoForge. Local-only until the maintainer approves
+# publishing (ARCHITECTURE.md §8).
+name = "horizon-pocketstorage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Pocket Storage for Horizon: a tiered item that carries its own inventory"
+
+[lib]
+# This exact source is also injected as a same-crate module by horizon-mixins.
+path = "mixins/pocketstorage/runtime.rs"
