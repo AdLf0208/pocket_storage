@@ -1,0 +1,20 @@
+{
+  "type": "minecraft:crafting_shaped",
+  "category": "misc",
+  "key": {
+    "A": "#c:ingots/iron",
+    "B": "minecraft:piston",
+    "C": "#c:dusts/redstone",
+    "D": "#c:chests"
+  },
+  "pattern": [
+    "ABA",
+    "CDC",
+    "ABA"
+  ],
+  "result": {
+    "count": 1,
+    "id": "pocketstorage:psu_1"
+  },
+  "show_notification": false
+}

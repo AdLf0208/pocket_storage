@@ -1,0 +1,25 @@
+id = "pocketstorage"
+name = "Pocket Storage"
+version = "0.2.0"
+description = """A port of Pocket Storage for Horizon: a tiered item that carries its own
+inventory. Tier 1 holds 8 kinds of item with up to 255 of each (tiers 2-4 are 16 x 4095,
+32 x 65535 and 64 x 1048575). Sneak + right-click a container deposits all but one of each
+held kind; sneak + left-click withdraws the kinds the unit already holds. The contents ride
+the stack's own pocketstorage:contents component, so a saved, thrown or picked-up unit keeps
+everything. /psu list|put|help stands in for the upstream screen this slice does not carry."""
+authors = ["Flanks255", "AdLf0208"]
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
+# beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's
+# package name and version are not the mod's.
+api = "0.2"
+# "both" is the installation side, not the hook's: an integrated server belongs to the
+# client installation, so a LAN host or a single-player world needs both.
+side = "both"
+# The one shared value every manifest carries ("May add blocks, items, mob effects and entity
+# types"): the unit item, its creative tab and its recipe are content this package registers.
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
