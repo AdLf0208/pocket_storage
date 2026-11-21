@@ -11,12 +11,13 @@
 # egg). The arena floor is stone, the air above it is cleared and every
 # non-player entity is removed before a phase needs a clean level.
 #
-# Default run (EMBEDDED=0): the game loads `content/` as a dev mod.
-# EMBEDDED=1: the game is launched with **only the native bundle** (no
-# `--dev-mod`) and the content comes from the bundle's embedded copy
-# (`mixins/<id>/data/…`, the AE2 pattern); the run also checks the file the
-# helper wrote, and CONTROL=1 (default with EMBEDDED) first launches the same
-# binary with `.horizon-cache` unusable, where the id must be unknown.
+# FORMAT (2026-11-18): this port is one flat SDK package, so the code and the content
+# travel together. `GAME` must be the game the **launcher** built from this package
+# (`ports/tools/launcher-game.sh run pocketstorage` supplies it, with `CTL`,
+# `CONTROL_GAME` and `RES`); there is no `--dev-mod` any more.
+#
+# CONTROL=1 (the launcher run sets `CONTROL_GAME`) first launches the same Nightly
+# **without** the package, where the id must be unknown.
 #
 # Phases:
 #  A  the unit item exists and is held;
@@ -29,24 +30,29 @@
 #  F  sneak + left-click the chest takes back exactly the kinds the unit holds
 #     (the chest's dirt stays), and a plain item never deposits;
 #  G  the contents survive a drop and a pickup;
-#  H  the contents survive a relaunch.
+#  H  the contents survive a relaunch;
+#  I  a locked chest refuses both transfers;
+#  J  the carried tier-1 recipe and the three `pocketstorage:upgrade` recipes
+#     craft in a crafting table, each upgrade keeping the unit's contents, and a
+#     tier-2 unit in the tier-2 pattern makes nothing.
 #
 # SELFTEST=1 flips F's "the chest is empty" assertion (it must FAIL), proving the
-# scenario can fail.
+# scenario can fail. NEGATIVE=1 flips J's contents assertion (it must FAIL too),
+# so the upgrade family has its own counterfactual.
 set -Eeuo pipefail
 export LC_ALL=C
 [ -z "${PS_DEBUG:-}" ] || set -x
 
-EMBEDDED=${EMBEDDED:-0}
-CONTROL=${CONTROL:-$EMBEDDED}
+CONTROL=${CONTROL:-0}
 SELFTEST=${SELFTEST:-0}
 KEEP=${KEEP:-0}
 
 CLONE=${CLONE:-$(cd "$(dirname "$0")/../../.." && pwd)}
 PORT=$CLONE/ports/pocketstorage
 PIN_BIN=$CLONE/ports/_shared/bin/horizon-1d63e0a5
-CTL=${CTL:-$PIN_BIN/horizon-ctl}
-GAME=${GAME:-$PORT/target/horizon-cargo/fast/horizon-client}
+CTL=${CTL:-}
+GAME=${GAME:-}
+CONTROL_GAME=${CONTROL_GAME:-}
 RES=${RES:-${HORIZON_RES:-/home/adlf/Desktop/horizon/.local/horizon-client/26.3}}
 SOCK=${SOCK:-/tmp/opencode/pocketstorage-e2e.sock}
 WORLD=PocketStorageE2E
@@ -92,18 +98,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-launch() { # launch [WORLD]
+launch() { # launch [WORLD] [GAME]
     local world=${1:-$WORLD}
+    local game=${2:-$GAME}
     rm -f "$SOCK"
     cd "$SCRATCH"
-    local args=(--game "$GAME" --world "$world" --seed 20261105 --creative --headless
-                --wait --resources "$RES")
-    if [ "$EMBEDDED" = 1 ]; then
-        echo "  launch: no --dev-mod; the bundle carries its own content" >&2
-    else
-        args+=(--dev-mod "$PORT/content")
-    fi
-    "$CTL" --socket "$SOCK" launch "${args[@]}" >/dev/null
+    # `--offscreen`, not `--headless`: the recipe phase opens a crafting-table menu
+    # and clicks its slots, and a headless client never opens a screen (the same
+    # reason chisel and additional_lights launch offscreen for their craft phases).
+    "$CTL" --socket "$SOCK" launch --game "$game" --world "$world" --seed 20261105 \
+        --creative --offscreen --wait --resources "$RES" >/dev/null
     ctl wait-ready 120 >/dev/null
     ctl wait 40 >/dev/null
 }
@@ -182,19 +186,21 @@ container_count() { # container_count X Y Z ITEM
 container_total() { ctl container "$1" "$2" "$3" | jq -r '[.slots[] | select(.item != null) | .count] | add // 0'; }
 
 # Stand two blocks west of the chest and click one of its faces.
-aim_chest() { # aim_chest FACE
-    ctl command "execute in minecraft:the_end run tp @s $((CHEST_X - 2)).5 101 0.5" >/dev/null
+aim_chest() { # aim_chest FACE [X]
+    local x=${2:-$CHEST_X}
+    ctl command "execute in minecraft:the_end run tp @s $((x - 2)).5 101 0.5" >/dev/null
     ctl wait 6 >/dev/null
-    ctl look-at-block "$CHEST_X" 101 0 "$1" >/dev/null
+    ctl look-at-block "$x" 101 0 "$1" >/dev/null
     ctl wait 2 >/dev/null
 }
 
-sneak_click() { # sneak_click right|left FACE
-    aim_chest "$2"
+sneak_click() { # sneak_click right|left FACE [X]
+    local x=${3:-$CHEST_X}
+    aim_chest "$2" "$x"
     ctl key shift down >/dev/null
     ctl wait 4 >/dev/null
     if [ "$1" = right ]; then
-        ctl interact "$CHEST_X" 101 0 "$2" >/dev/null
+        ctl interact "$x" 101 0 "$2" >/dev/null
     else
         ctl mouse left click >/dev/null
     fi
@@ -203,46 +209,31 @@ sneak_click() { # sneak_click right|left FACE
     ctl wait 6 >/dev/null
 }
 
-# The control for EMBEDDED=1: the same binary (every hook is in it) with the
-# embedded content made unavailable — `.horizon-cache` is a plain file, so the
-# helper can neither compare nor write its content file and falls back to
-# `Continue`. The id must then be unknown; if it resolves, the run proves
-# nothing about the embedded file.
+# The control: the same Nightly, unmodified (the launcher exports it as
+# `CONTROL_GAME`), so the only difference is the package. The id must be unknown.
 control_leg() {
-    echo "== control: the same game with no embedded content file =="
-    rm -rf "$SCRATCH/.horizon-cache"
-    : > "$SCRATCH/.horizon-cache"
-    launch "$CONTROL_WORLD"
+    echo "== control: the same Nightly without this package =="
+    launch "$CONTROL_WORLD" "$CONTROL_GAME"
     arena
-    ctl command "item replace entity @s hotbar.0 with $UNIT 1" >/dev/null || true
+    ctl command "item replace entity @s hotbar.0 with $UNIT 1" >/dev/null 2>&1 || true
     ctl wait 4 >/dev/null
     ctl inventory | jq -e "[.hotbar[], .main[] | select(.item == \"$UNIT\")] | length == 0" >/dev/null \
-        || fail "the control game has the unit item, so the content did not come from the embedded file"
-    ctl command "execute in minecraft:the_end run setblock $CHEST_X 101 0 $UNIT" >/dev/null || true
+        || fail "the control game has the unit item, so the package was in it"
+    ctl command "execute in minecraft:the_end run setblock $CHEST_X 101 0 $UNIT" >/dev/null 2>&1 || true
     ctl wait 4 >/dev/null
     local name
     name=$(block_name "$CHEST_X" 101 0)
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the item id was known"
-    [ -f "$SCRATCH/.horizon-cache" ] || fail "the control's .horizon-cache was replaced: the helper wrote its content"
-    echo "  without the embedded file: no unit item, the id is unknown"
+    echo "  without the package: no unit item, the id is unknown"
     ctl quit >/dev/null 2>&1 || true
-    rm -f "$SCRATCH/.horizon-cache"
-}
-
-# EMBEDDED=1: the bundle must have written its content out at startup, byte for
-# byte the delivered content mod.
-embedded_content_check() {
-    local cache=$SCRATCH/.horizon-cache/pocketstorage-embedded-content.hmod
-    [ -f "$cache" ] || fail "the bundle did not write its embedded content to $cache"
-    cmp -s "$cache" "$PORT/content/pocketstorage.hmod" \
-        || fail "the embedded content differs from content/pocketstorage.hmod"
-    echo "  embedded content: $(wc -c < "$cache" | tr -d ' ') B at $cache, identical to content/pocketstorage.hmod"
 }
 
 echo "== launch (The End arena, content + native bundle) =="
-if [ "$CONTROL" = 1 ]; then control_leg; fi
+if [ "$CONTROL" = 1 ]; then
+    [ -n "$CONTROL_GAME" ] || { echo "CONTROL=1 needs CONTROL_GAME" >&2; exit 2; }
+    control_leg
+fi
 launch
-if [ "$EMBEDDED" = 1 ]; then embedded_content_check; fi
 arena
 
 echo "== A: the unit item registers and is held =="
@@ -371,4 +362,63 @@ case "$LINE" in
 esac
 echo "  the chest still holds its 16 dirt: $(container_count "$CHEST_X" 101 0 minecraft:dirt)"
 
-echo "PASS: the unit registers and holds nothing, reports 8 kinds of 255, fills one slot to exactly 255 and refuses the other 45, takes a second kind in the next slot, deposits all but one of each kind into a chest (254 + 9), withdraws exactly the kinds it holds (the chest's dirt stays), a plain diamond deposits nothing, and both the drop/pickup and the relaunch keep 255 diamonds and 10 cobblestone"
+echo "== I: a locked chest refuses both transfers =="
+# A container's vanilla lock (`BlockEntity.lock`, set here with `data merge block`) is the
+# access rule its open path asks; the unit's transfers go through the sided capability,
+# which bypasses it, so a locked chest must take nothing and give nothing. A fresh unit
+# is used so both directions have room, and the main unit's 265 items are not touched.
+LOCKED_X=$((X0 + 3))
+ctl command "item replace entity @s hotbar.0 with $UNIT 1" >/dev/null
+ctl wait 6 >/dev/null
+ctl select 1 >/dev/null
+ctl wait 4 >/dev/null
+ctl command "give @s minecraft:diamond 4" >/dev/null
+ctl wait 6 >/dev/null
+say "psu put minecraft:diamond 4"
+ctl wait 12 >/dev/null
+read_unit
+[ "${S0_COUNT:-}" = 4 ] || fail "the fresh unit took ${S0_COUNT:-none} diamonds, expected 4"
+ctl command "execute in minecraft:the_end run setblock $LOCKED_X 101 0 minecraft:chest" >/dev/null
+ctl wait 6 >/dev/null
+LOCK_REPLY=$(ctl command "data merge block $LOCKED_X 101 0 {lock:{items:\"minecraft:barrier\"}}" 2>&1 || true)
+echo "  lock: $LOCK_REPLY"
+ctl wait 6 >/dev/null
+ctl container "$LOCKED_X" 101 0 minecraft:diamond 6 >/dev/null
+ctl wait 6 >/dev/null
+[ "$(container_count "$LOCKED_X" 101 0 minecraft:diamond)" = 6 ] || fail "the locked chest did not take its 6 diamonds"
+ctl command "execute in minecraft:the_end run tp @s $((LOCKED_X - 2)).5 101 0.5" >/dev/null
+ctl wait 6 >/dev/null
+ctl key shift down >/dev/null
+ctl wait 4 >/dev/null
+ctl interact "$LOCKED_X" 101 0 west >/dev/null 2>&1 || true
+ctl wait 8 >/dev/null
+ctl key shift up >/dev/null
+ctl wait 6 >/dev/null
+LOCKED_DEPOSIT=$(container_count "$LOCKED_X" 101 0 minecraft:diamond)
+[ "$LOCKED_DEPOSIT" = 6 ] || fail "the unit deposited into a locked chest ($LOCKED_DEPOSIT diamonds, expected 6)"
+ctl key shift down >/dev/null
+ctl wait 4 >/dev/null
+ctl mouse left click >/dev/null 2>&1 || true
+ctl wait 8 >/dev/null
+ctl key shift up >/dev/null
+ctl wait 6 >/dev/null
+LOCKED_WITHDRAW=$(container_count "$LOCKED_X" 101 0 minecraft:diamond)
+[ "$LOCKED_WITHDRAW" = 6 ] || fail "the unit withdrew from a locked chest ($LOCKED_WITHDRAW diamonds, expected 6)"
+read_unit
+[ "${S0_COUNT:-}" = 4 ] || fail "the unit's diamonds changed through a locked chest (${S0_COUNT:-none}, expected 4)"
+echo "  the locked chest still holds 6 diamonds; the unit still holds 4 (deposit and withdraw both refused)"
+
+echo "== J: the carried recipes craft, and the three upgrades keep the contents =="
+# The tier-1 recipe and the three `pocketstorage:upgrade` recipes, crafted the way
+# they declare in a real crafting table, with the ingredient consumption and the
+# contents-riding assert. A tier-2 unit in the tier-2 pattern must make nothing.
+# `NEGATIVE=1` flips the contents assertion, so this leg must exit 1 (a second,
+# family-specific counterfactual beside SELFTEST's phase-F flip).
+ctl command "gamemode survival @s" >/dev/null
+ctl wait 6 >/dev/null
+ctl command "execute in minecraft:the_end run setblock $((X0 + 4)) 101 0 minecraft:crafting_table" >/dev/null
+ctl wait 6 >/dev/null
+python3 "$PORT/tools/craft_upgrade.py" "$SOCK" "$CTL" $((X0 + 4)) 101 0 || fail "the recipe/upgrade check failed"
+echo "recipes PASS"
+
+echo "PASS: the unit registers and holds nothing, reports 8 kinds of 255, fills one slot to exactly 255 and refuses the other 45, takes a second kind in the next slot, deposits all but one of each kind into a chest (254 + 9), withdraws exactly the kinds it holds (the chest's dirt stays), a plain diamond deposits nothing, a locked chest refuses both transfers, both the drop/pickup and the relaunch keep 255 diamonds and 10 cobblestone, the carried tier-1 recipe crafts in a table, and the jar's gold/diamond/nether-star upgrades make tiers 2, 3 and 4 each keeping the unit's 30 diamonds while a tier-4 unit in the tier-2 pattern makes nothing"

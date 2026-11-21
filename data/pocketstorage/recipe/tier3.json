@@ -1,0 +1,19 @@
+{
+  "type": "pocketstorage:upgrade",
+  "category": "misc",
+  "key": {
+    "A": "#c:gems/diamond",
+    "B": "minecraft:piston",
+    "C": "#c:chests",
+    "D": "pocketstorage:psu_2"
+  },
+  "pattern": [
+    "ABA",
+    "CDC",
+    "ABA"
+  ],
+  "result": {
+    "count": 1,
+    "id": "pocketstorage:psu_3"
+  }
+}

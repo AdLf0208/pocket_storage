@@ -1,66 +1,53 @@
-# Pocket Storage — a Horizon port
+# Pocket Storage — Horizon port (SDK package)
 
-**Pocket Storage** is a Minecraft mod. This repository is a **port of it to [Horizon](https://github.com/horizon-rust/horizon)**, the Rust engine for Minecraft Java 26.3. It carries the complete source of the port plus the content files it ships, and installs as a single `.hmod` package.
+A native Horizon port of **Pocket Storage 1.2.5** (`Flanks255/PocketStorage`, **MIT**): a
+storage unit that carries its own inventory in the item. This package ships all four tiers —
+`pocketstorage:psu_1` to `psu_4`, 8×255 up to 64×1,048,575 — the jar's tier-1 recipe and its
+three upgrade recipes, which carry the old unit's contents onto the next tier.
 
-Upstream: [Flanks255/pocketstorage](https://github.com/Flanks255/pocketstorage) — licence **MIT**.
+**LOCAL-ONLY** until the maintainer approves publishing (ARCHITECTURE.md §8). MIT is
+licence rank 0 (permissive); approval is still required.
 
-| | |
+The behaviour reading is in `FINDINGS.md`; the ladder, deviations and gaps are in `notes.md`;
+the content decisions are in `CONTENT.md`. Those files are repository documentation and are not
+part of the built `.hmod`.
+
+## In game
+
+| Gesture / recipe | What happens |
 |---|---|
-| Upstream mod | Pocket Storage ([source](https://github.com/Flanks255/pocketstorage)) |
-| Ported to | Horizon 0b14f8a, Minecraft Java 26.3, mod API `0.2` |
-| Package | `pocketstorage.hmod` (install it with the Horizon launcher) |
-| Licence | **MIT** — the upstream mod's licence; see [Licence and credit](#licence-and-credit) |
+| sneak + **right-click** a container | the unit empties into it, **all but one** of each kind (so the slot keeps the kind) |
+| sneak + **left-click** a container | the unit takes back the kinds it already holds, up to each slot's room; the dig is cancelled |
+| `/psu list` | the held unit's slots and counts |
+| `/psu put <item> [n]` | move n (1) plain items from your inventory into the held unit — the screen's insert half, for this slice |
+| `/psu help` | the usage text |
+| **craft** iron + piston + redstone + chest | one tier-1 unit (the jar's own 3×3) |
+| **craft** a unit in a tier's upgrade pattern | the next tier, holding everything the old unit held (gold → tier 2, diamond → tier 3, nether star → tier 4) |
 
-## What this port implements
+Only simple items go in: not another unit, no custom components, no damage.
 
-- **`pocketstorage:psu_1`** (`data/pocketstorage/horizon/item/psu_1.json`, the
-- **8 slots of 255** — upstream's `PSUTier.TIER1` (`slots = 8`,
-- **The gestures**, upstream's own: **sneak + right-click** a container
-- **The contents are the stack's** — the `pocketstorage:contents` component
-- **Only simple items** go in: not another unit, no custom component, no damage
-- **`/psu list|put <item> [n]|help`** — a documented extension standing in for
+## Numbers (upstream's `PSUTier`)
 
-## Not yet ported
+| Tier | Slots | Per slot | Upgrade from the previous tier |
+|---|---:|---:|---|
+| 1 | 8 | 255 | crafted: 4 iron ingots, 2 pistons, 2 redstone, 1 chest |
+| 2 | 16 | 4,095 | 4 gold ingots, 2 pistons, 2 chests around the tier-1 unit |
+| 3 | 32 | 65,535 | 4 diamonds, 2 pistons, 2 chests around the tier-2 unit |
+| 4 | 64 | 1,048,575 | 4 pistons, 2 chests, 2 nether stars around the tier-3 unit |
 
-- **Tiers 2–4** (`psu_2` 16 × 4,095, `psu_3` 32 × 65,535, `psu_4` 64 ×
-- **The upgrade recipe type** (`pocketstorage:upgrade`, a shaped recipe whose
-- **The screen** (`PSUGui`/`PSUContainer`): no menu, no 8-slot container view;
-- **The tooltip** (`appendHoverText`: the capacity line, the deposit/withdraw
-- **Pickup absorption** (`ItemEntityPickupEvent.Pre` → into a matching slot,
-- **The unit's UUID, `StorageManager` cache and `/psu open|list|recover`**: not
-- **Sounds** (`SoundEvents.ITEM_PICKUP` on deposit/withdraw), the screen's
-- **Config**: upstream ships none.
+## Package
 
-## Installing
+This is one flat SDK package (`horizon-mod.toml` + `Cargo.toml` + `src/` + `assets/` +
+`data/`), built with the `cargo-horizon-mod` tool against the release pinned in
+`horizon-mod.toml`:
 
-1. Install the [Horizon launcher](https://github.com/horizon-rust/horizon/releases) (0.2.70 or newer).
-2. Add `pocketstorage.hmod` to the instance's mods.
-3. The package is pinned to a specific Horizon build; the launcher checks that pin.
-
-## Licence and credit
-
-Pocket Storage was created by its upstream authors; the code, models and assets in the original mod
-remain theirs and are used here under **MIT**. The Rust in this repository is a clean-room
-rewrite for Horizon, not a translation of the original source.
-
-- `LICENSE` — the upstream licence text.
-- `LICENSE-NOTICE.md` — what this port carries and where it came from.
-- The upstream project: https://github.com/Flanks255/pocketstorage
-
-## Technical details
-
-```
-horizon-mod.toml   package manifest (id, version, api, [native] pin)
-Cargo.toml         the crate; depends on `horizon-mod-api` from the fetched SDK
-src/               lib.rs (the one `impl Hooks`), runtime.rs (pure logic + tests), glue
-assets/ data/      the content the package ships
-tools/             content generators and the e2e scenario
+```sh
+cargo test --offline                                         # 29 unit tests
+cargo horizon-mod build                                      # -> target/horizon-mod/pocketstorage.hmod
+cargo horizon-mod check pocketstorage.hmod                   # the registry's own check
+cargo horizon-mod fits pocketstorage.hmod --build <nightly>   # does it still fit another build
 ```
 
-- Build: `cargo horizon-mod build` (packages; it does not compile against the game).
-- Test: `cargo test`, `cargo clippy --all-targets -- -D warnings`.
-- In-game: `ports/tools/launcher-game.sh run pocketstorage` in the campaign tree, or install the
-  `.hmod` and play; the harness scenario is `tools/e2e.sh`.
-
-This repository is generated from the campaign's port at `ports/pocketstorage/`; the port's own
-`notes.md` is the full record (decisions, traps, evidence).
+`src/runtime.rs` is the pure logic (the tiers, slot arithmetic, the deposit and withdraw
+rules, the upgrade pattern, `/psu`); `src/lib.rs` is the one `impl Hooks` that reads the stack
+component, registers the upgrade crafting kind and writes results back through the host.

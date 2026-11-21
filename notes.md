@@ -8,8 +8,9 @@ approves publishing (ARCHITECTURE.md §8). Pin **`1d63e0a5`** (`game.rs`
 `64813cf4…`), mixins **`5a64af93…`** (schema 6).
 
 Status: **ported-partial** — slice 1 (the tier-1 unit's own inventory, the two
-container gestures and the `/psu` command fallback) is implemented and
-verified in-game. The gap list at the end is the rest of the mod.
+container gestures and the `/psu` command fallback) and slice 2 (tiers 2–4 and the
+jar's three upgrade recipes) are implemented and verified in-game. The gap list at
+the end is the rest of the mod.
 **Format:** migrated to the flat SDK package (`.hmod`, `api = "0.2"`) on
 2026-11-18 — see *Migration to the SDK format* at the end; the behaviour is
 unchanged and `runtime.rs` is byte-identical.
@@ -130,35 +131,45 @@ Both are reproducible: `tools/package.py` run twice gave the same bytes
 
 ## Gaps (the rest of the mod)
 
-- **Tiers 2–4** (`psu_2` 16 × 4,095, `psu_3` 32 × 65,535, `psu_4` 64 ×
+> **Slice 2 closed two of these (2026-11-21):** tiers 2–4 and the upgrade recipes
+> are now carried and proven in game — see *Slice 2* below. The list keeps the
+> original wording for the record, with the closed items marked.
+
+- ~~**Tiers 2–4** (`psu_2` 16 × 4,095, `psu_3` 32 × 65,535, `psu_4` 64 ×
   1,048,575): only the tier-1 item is carried; the runtime already holds all
   four tiers' numbers, but the items, models/tabs and the upgrade path are not
-  shipped.
-- **The upgrade recipe type** (`pocketstorage:upgrade`, a shaped recipe whose
+  shipped.~~ **Shipped in slice 2** (items, rarities, models, tab, upgrade path).
+- ~~**The upgrade recipe type** (`pocketstorage:upgrade`, a shaped recipe whose
   `D` is the previous unit, with its `ShapedRecipe.pattern` access transformer):
   the pin has no custom recipe type a port can register, so a tier-2..4 recipe
-  cannot be authored yet. The three upgrade recipes are a named gap.
+  cannot be authored yet.~~ **Stale:** at `0a875da` a mod *can* register a crafting
+  kind (`CraftingRecipeKind`), so the three upgrade recipes are authored and
+  proven in game. See *Slice 2*.
 - **The screen** (`PSUGui`/`PSUContainer`): no menu, no 8-slot container view;
   `/psu put|list` is the substitute. The jar's three GUI textures are not
-  carried.
+  carried. The pin now has a no-block mod-menu path (`PlayerRef::open_mod_menu`,
+  `MenuPart`, `MenuSlotPlace`), so this is the next slice's shape.
 - **The tooltip** (`appendHoverText`: the capacity line, the deposit/withdraw
   hints, the advanced-tooltip UUID): not carried, so the item shows only its
-  name.
+  name. (`ItemStack::set_display` is new at `0a875da`; a stored lore line is not
+  upstream's computed tooltip and would change the stack's data, so it waits for
+  a tooltip hook.)
 - **Pickup absorption** (`ItemEntityPickupEvent.Pre` → into a matching slot,
   excess **voided**): the pin's `item_picked_up` is a cancellable hook that
   could do it; not in this slice, so a unit fills only by `/psu put` and the
   withdraw gesture.
 - **The unit's UUID, `StorageManager` cache and `/psu open|list|recover`**: not
-  carried. They are upstream's bookkeeping for the screen and the upgrade
-  recipe, both gaps above.
+  carried. They are upstream's bookkeeping for the screen.
+- **The recipe book**: the three upgrades are not *displayed* in it. A mod
+  crafting kind has no `recipe_book_display` entry in this package, and the
+  engine's mod-book path wants `PlacementInfo` per recipe; the recipes craft
+  from a grid regardless (`notes.md` § Slice 2, in-game phase J).
 - **Sounds** (`SoundEvents.ITEM_PICKUP` on deposit/withdraw), the screen's
   scrolling/buttons, the block-placement feature the README lists as planned.
 - **Config**: upstream ships none.
-- **The tier-1 recipe and the creative tab are carried but not exercised in
-  game**: a malformed recipe would refuse the content root (the item loads, so
-  they parse), but the headless harness has no renderer for `ctl click-slot` on
-  a crafting grid, and the tab needs a screen. Their correctness is therefore
-  from the `.hmod` check and the content load, not from a craft in the e2e.
+- ~~**The tier-1 recipe and the creative tab are carried but not exercised in
+  game**~~: **the tier-1 recipe is crafted in game since slice 2** (phase J); the
+  creative tab still needs a screen and remains unverified.
 
 ## Deviations (deliberate, all recorded above)
 
@@ -425,3 +436,192 @@ game's own equip write); `runtime.rs` and its 19 tests unchanged."*
 
 Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
 
+
+## Review fixes (2026-11-18) — registry source review #1177
+
+Skills: superpowers/using-superpowers,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices
+
+File: `var/review-all/1177-pocketstorage.md`. Package **0.2.1**, `pocketstorage.hmod` 26,878 B,
+sha256 `d79212c6e573aa6b69a784d77dc1ca0e68bdf30454ec16e32f4514a9bfea62c0`.
+
+1. **`src/lib.rs:230` (sneak-left-click withdraw) and `:169` (deposit) used the sided automation
+   capability and bypassed the player-facing lock.** Both paths now ask
+   `runtime::container_allows_transfer(container_locked(…))` first: the container's vanilla lock
+   (`BlockEntity.lock`, read through the `BlockEntityRef::lock` handle) refuses the transfer with
+   *"That container is locked"*, so the unit cannot take from or put into a container its owner
+   locked. Pinned by `a_locked_container_refuses_the_transfer_a_player_could_not_make` (unit) and
+   by the in-game phase **E2**: a chest given `{lock:{}}` by `data merge block` takes nothing and
+   gives nothing, and the unit keeps its contents. `cargo test`: **21 passed**.
+
+**In-game leg.** `ports/tools/launcher-game.sh run pocketstorage` → `PASS` + `E2E EXIT:0`
+(`ports/_shared/evidence/pocketstorage-e2e/e2e-launcher.log`); the package-less Nightly fails at the
+first id (`…-control.log`, `EXIT:1`). Phase **I** gives a chest `{lock:{…}}` with `data merge
+block`: the unit deposits nothing into it and withdraws nothing from it.
+
+## Slice 2 (2026-11-21) — tiers 2–4 and the three upgrade recipes
+
+Skills: superpowers/using-superpowers,brainstorming,writing-plans,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+Pin **`0a875da91dbb0fdcb7ba8c42c11341aa229af51a`** (Nightly 2026-11-20) + mixins
+`e59da9094f0c2fdda6c627fe9eff22dec6a906f0`. Package **0.2.5**, `pocketstorage.hmod`
+**40,212 B** `4c9e6b3330d130fc0d859bf796e6689be1857300143c0d9e4586a98a3a3a0971`, 33 entries.
+
+### The slice, and where it came from
+
+Two gap lines of this file, one family:
+
+> **Tiers 2–4** (`psu_2` 16 × 4,095, `psu_3` 32 × 65,535, `psu_4` 64 × 1,048,575): only the
+> tier-1 item is carried; the runtime already holds all four tiers' numbers, but the items,
+> models/tabs and the upgrade path are not shipped.
+
+> **The upgrade recipe type** … the pin has no custom recipe type a port can register, so a
+> tier-2..4 recipe cannot be authored yet.
+
+The second line was **stale, and that is the finding of this slice**: at `0a875da`
+`mod_api::CraftingRecipeKind` + `Registrar::register_crafting_recipe_serializer` register a
+crafting kind with `decode`/`write`/`matches`/`assemble`/`remaining_items`
+(`ports/_shared/sdk/0a875da/crates/horizon-mod-vocab/src/parts/crafting_recipes.rs`), and the
+engine loads a recipe whose `type` names it into the crafting table
+(`crates/horizon-client/src/crafting/mod_kinds.rs`, `find_with_dimensions` → `Recipe::Mod`).
+So upstream's `pocketstorage:upgrade` is expressible **without** a custom recipe type, and the
+three upgrades are authored as data.
+
+It fits the `machines` tier: items and recipes are content, and the upgrade rule (which grid,
+which tier, what rides onto the result) is the port's own logic, in the pure runtime.
+
+### What it adds
+
+- **`pocketstorage:psu_2` … `psu_4`** — the jar's own model (one shared texture), the tier's
+  rarity (`uncommon`, `rare`, `epic`), `max_stack_size: 1`, in the creative tab beside tier 1,
+  with the jar's `item.pocketstorage.psu_<n>` names.
+- **The upgrade crafting kind** (`pocketstorage:upgrade`): upstream's shaped 3×3 whose centre
+  is the previous tier's unit; matching checks every cell (item or tag), and `assemble` builds
+  the next tier's unit and copies the old unit's `pocketstorage:contents` onto it with
+  `ItemStack::copy_component_from` — the upgraded unit keeps everything it held.
+- **The three recipe files** (`tier2..4.json`) in 26.3's ingredient form, plus the two
+  convention tags they need (`c:ingots/gold`, `c:gems/diamond`, `c:nether_stars`; `c:chests`
+  already existed). Tier 4 is the jar's turned-around shape (pistons in the corners, chests
+  above and below, nether stars on the sides).
+
+### Hook and helper map (added to the table above)
+
+| Hook (API) | Glue | What it does |
+|---|---|---|
+| `register` (`Hooks::register`) | `Mod::register` | resolves the five item ids an upgrade may name (`Registrar::item_key`) and registers the `upgrade` crafting kind |
+| `tags_updated` | `Mod::tags_updated` → `refresh_upgrade_tags` | caches the four tags' members, because a craft-time match takes no host and a tag cell must be answered from memory |
+
+Helpers used: `CraftingRecipeKind` / `CraftingRecipeCodec::wire()` / `CraftingGrid` (API of
+`0a875da`), `ItemStack::copy_component_from`, `Host::tags()` (`Tags::key` + `Tags::items`),
+`ItemStack::new`/`item`.
+
+### TDD (red first, quoted)
+
+`sdk-upgrade-test-red.log` — the six new tests were written before any of the new types existed:
+
+```
+error[E0433]: cannot find type `Upgrade` in this scope        (9×)
+error[E0433]: cannot find type `PatternCell` in this scope   (15×)
+error[E0425]: cannot find function `decode_upgrade` …        (4×)
+error: could not compile `pocketstorage` (lib test) due to 35 previous errors
+build-slot: released slot 3 (exit 101)
+```
+
+Green: `cargo test --offline` → **29 passed, 0 failed** (`sdk-test.log`), the 20 of slice 1
+plus 9 for this family: the tier step and its refusals, the pattern match (wrong item, wrong
+cell, missing cell, nothing resolved), the tag-cell ask, the three shipped recipes decode, the
+three files name the jar's ingredients, the tier-1 file is 26.3's ingredient form, and the kind
+value round-trips through `write` → `decode` (`lib.rs`).
+
+### In game (verbatim, `pocketstorage-e2e/e2e-launcher.log`, phase J)
+
+```
+== the carried tier-1 recipe crafts in a crafting table ==
+  iron + piston + redstone + chest -> {"count": 1, "item": "pocketstorage:psu_1", "slot": 200}
+  the unit holds 30 diamonds before the upgrade
+== the jar's upgrade pattern makes tier 2 and keeps the contents ==
+  gold + piston + chest around psu_1 -> {"components": "{\"pocketstorage:contents\":[{count:30,id:\"minecraft:diamond\",slot:0}]}", "count": 1, "item": "pocketstorage:psu_2", "slot": 200}
+== diamonds upgrade tier 2 to 3 ==
+  diamond + piston + chest around psu_2 -> {"components": "{\"pocketstorage:contents\":[{count:30,id:\"minecraft:diamond\",slot:0}]}", "count": 1, "item": "pocketstorage:psu_3", "slot": 200}
+== nether stars upgrade tier 3 to 4 ==
+  piston + chest + nether star around psu_3 -> {"components": "{\"pocketstorage:contents\":[{count:30,id:\"minecraft:diamond\",slot:0}]}", "count": 1, "item": "pocketstorage:psu_4", "slot": 200}
+  pocketstorage:psu_4: 1 of 64 kinds, 30 items, 1048575 each at most
+== the control: a tier-4 unit is not the tier-1 ingredient ==
+  gold + piston + chest around psu_4 -> null
+  the tier-4 unit stayed in the grid: the recipe is the tier it declares
+craft PASS: … a tier-4 unit in the tier-2 pattern makes nothing
+```
+
+Every craft also asserts that the ingredients were **consumed** (inventory counts at 0 and an
+empty grid after the take). The control is the same tier-2 pattern with a tier-4 unit in its
+centre: no result, the unit stays in the grid and comes back holding its 30 diamonds.
+`NEGATIVE=1` flips the "the upgraded unit kept its 30 diamonds" assertion and the run exits 1
+(`e2e-launcher-negative.log`), so the family has its own counterfactual beside `SELFTEST=1`.
+
+### Coverage (the jar's families)
+
+| Family (jar) | Status | Proof |
+|---|---|---|
+| tier 1 item + model + texture | tested | phases A–B (held, readout, component) |
+| tiers 2–4 items, models, rarities, tab | tested | phase J (`psu_2`/`psu_3`/`psu_4` crafted, held, readout of tier 4: 64 kinds, 1,048,575) |
+| tier-1 recipe (`minecraft:crafting_shaped`) | tested | phase J: crafted in a table, ingredients consumed |
+| three upgrade recipes (`pocketstorage:upgrade`) | tested | phase J: each crafted, contents carried, old unit + materials consumed; control refuses the wrong tier |
+| the two container gestures | tested | phases E–F, F2, I |
+| the unit's contents component (save/drop/relaunch) | tested | phases G, H |
+| the screen / menu (`PSUGui`) | not ported | gap (next slice; the pin has `open_mod_menu`/`MenuPart`) |
+| the tooltip lines | not ported | gap (`ItemStack::set_display` exists, no tooltip hook) |
+| pickup absorption + voiding | not ported | gap (`item_picked_up` is available) |
+| recipe-book display of the upgrades | blocked(`PlacementInfo`) | the mod-book path wants placement info per recipe; crafting works without it |
+| sounds, UUID/`StorageManager`, block placement | not ported | gap |
+
+### Traps this slice hit (for the next one)
+
+1. **A crafting-table menu needs `--offscreen`, not `--headless`.** The first e2e run died at
+   `ctl screen` with `timed out waiting for the game's reply`: a headless client never opens a
+   screen. The launch is now `--offscreen` (chisel's and additional_lights' craft phases do the
+   same), which also means this leg stays local (the far box has no renderer).
+2. **`consumed` must run *after* the take, not before.** The take is what consumes the grid; an
+   assert before it reads the full grid and a correct craft looks broken.
+3. **`clear @s` between steps deletes the unit an upgrade is about to move.** The upgrade steps
+   use `setup(..., clear=False)` and rely on the previous step's consumption assert.
+4. **A test can codify a wrong assumption as easily as the code.** The first version of
+   `the_upgrade_files_name_the_jars_ingredients` asserted all three upgrades had the same
+   corner material — and the generated tier-4 file matched that wrong test, so both agreed and
+   the game refused the recipe. The jar's tier 4 is the turned-around shape; the test now
+   names each file's three materials from the jar, not from a common assumption.
+5. **`fits --build 0b14f8a` is red on a tool false positive** (`type:Item`, from the
+   `CommandArgumentValue::Item(stack)` match arm). Proven in
+   `ports/_shared/evidence/pocketstorage/fits-other-FALSE-POSITIVE.md`; the same false positive
+   is recorded for `extradisks`.
+
+### Verification of this slice
+
+| Step | Command | Log | Result |
+|---|---|---|---|
+| TDD red | `cargo test` before the types existed | `ports/_shared/evidence/pocketstorage/sdk-upgrade-test-red.log` | **EXIT:101**, 35 errors |
+| runtime tests | `cargo test --offline` | `sdk-test.log` | **29 passed**, 0 failed |
+| fmt + clippy | `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings` | `sdk-clippy.log` | `EXIT:0`, 0 warnings |
+| build ×2 | `rm -f Cargo.lock && cargo horizon-mod build` twice | — | **`cmp` identical**, `4c9e6b33…a0971` both |
+| registry check | `cargo horizon-mod check pocketstorage.hmod` | `sdk-check.log` | `native-mod, format native-1/0a875da…/e59da90…`, `EXIT:0` |
+| fits, own pin | `cargo horizon-mod fits … --build 0a875da` | `sdk-fits.log` | **`0a875da  made for`**, `EXIT:0` |
+| fits, older build | `cargo horizon-mod fits … --build 0b14f8a` | `sdk-fits-other.log` | `does not fit` (`EXIT:1`) — the documented **false positive**, proof beside it |
+| fits, another build | `cargo horizon-mod fits … --build 6d765e0` | `sdk-fits-other2.log` | the same one-item message, which is how the false positive was confirmed to be build-independent |
+| data dialect | `python3 ports/tools/check_261_dialect.py pocketstorage.hmod` | (run output) | 4 recipe files, **every one in the 26.3 dialect** |
+| package gate | `python3 ports/tools/verify-sdk-package.py pocketstorage` | — | **1/1**, runtime byte-identical, no `Cargo.lock`, 33 entries |
+| in game, package | `launcher-game.sh build pocketstorage` (`Compiling pocketstorage (1 of 1)`) then the leg | `pocketstorage-e2e/e2e-launcher.log` | **PASS + `EXIT:0`**, phases A–J |
+| in game, control | the same leg with `GAME=<the unmodded Nightly>` | `pocketstorage-e2e/e2e-launcher-control.log` | **`EXIT:1`** (phase A: the id is unknown) |
+| in game, selftest | `SELFTEST=1` | `pocketstorage-e2e/e2e-launcher-selftest.log` | **`EXIT:1`** (phase F's flip) |
+| in game, negative | `NEGATIVE=1` | `pocketstorage-e2e/e2e-launcher-negative.log` | **`EXIT:1`** (phase J's contents flip) |
+| log checker | `check-e2e-logs.py pocketstorage-e2e --strict` | — | `logs=4 ok=4` |
+
+The delivered `src/lib.rs`, `src/runtime.rs`, `horizon-mod.toml` and `Cargo.toml` are
+byte-identical to the tree the launcher built (checked with `unzip -p … | sha256sum`).
+
+**Changelog for the resubmission** (verbatim): *"0.2.5 adds the other three tiers and the jar's
+three upgrade recipes, and moves the package to Horizon `0a875da` (Nightly 2026-11-20; mixins
+unchanged). New: `pocketstorage:psu_2..4` with the jar's rarities and models; a registered
+`pocketstorage:upgrade` crafting kind (the mod-API path that now exists) whose recipes are the
+jar's shaped 3×3 patterns, each producing the next tier while carrying the previous unit's
+`pocketstorage:contents` onto it; `c:ingots/gold`, `c:gems/diamond` and `c:nether_stars` tags.
+The tier-1 recipe is now exercised in game, and the three upgrades are crafted in a table with
+their ingredients consumed and the unit's 30 diamonds preserved across 1→2→3→4; a unit of the
+wrong tier in a pattern makes nothing."*

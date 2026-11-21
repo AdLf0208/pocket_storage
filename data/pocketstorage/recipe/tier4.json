@@ -1,0 +1,19 @@
+{
+  "type": "pocketstorage:upgrade",
+  "category": "misc",
+  "key": {
+    "A": "minecraft:piston",
+    "B": "#c:chests",
+    "C": "#c:nether_stars",
+    "D": "pocketstorage:psu_3"
+  },
+  "pattern": [
+    "ABA",
+    "CDC",
+    "ABA"
+  ],
+  "result": {
+    "count": 1,
+    "id": "pocketstorage:psu_4"
+  }
+}

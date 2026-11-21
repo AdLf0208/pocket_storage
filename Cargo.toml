@@ -7,7 +7,7 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "pocketstorage"
-version = "0.2.0"
+version = "0.2.5"
 edition = "2024"
 license = "MIT"
 description = "Pocket Storage for Horizon: a tiered item that carries its own inventory"

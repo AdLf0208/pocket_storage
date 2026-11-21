@@ -1,9 +1,40 @@
-# Pocket Storage — validation ladder (slice 1)
+# Pocket Storage — validation ladder
 
-> **Format changed 2026-11-18.** This file is the `.hnmod` slice's ladder and stands as the
-> behaviour evidence. The SDK package's own ladder (runtime tests, fmt/clippy,
-> `cargo horizon-mod build`/`check`/`fits`) is in [`notes.md`](notes.md) § *Migration to the
-> SDK format*, with its logs in `ports/_shared/evidence/pocketstorage/sdk-*.log`.
+> **Format changed 2026-11-18.** The `.hnmod` slice's ladder (slice 1) stands as the
+> behaviour evidence. The SDK package's own ladders are in [`notes.md`](notes.md) § *Migration
+> to the SDK format* (0.2.0–0.2.1) and § *Slice 2* (0.2.5, tiers 2–4 + the upgrade recipes),
+> with their logs in `ports/_shared/evidence/pocketstorage/sdk-*.log` and
+> `ports/_shared/evidence/pocketstorage-e2e/`.
+
+## Slice 2 (0.2.5, pin `0a875da`): tiers 2–4 and the three upgrades
+
+Every step ran inside a `ports/tools/build-slot.sh` lease (`CARGO_INCREMENTAL=0`, no
+`--target-dir`, no private `BUILD_SLOTS_DIR`); the in-game legs ran locally (`--offscreen`,
+which the far box cannot render).
+
+| # | Step | Command | Evidence | Result |
+|---|---|---|---|---|
+| 1 | TDD red | `cargo test` before the family existed | `evidence/pocketstorage/sdk-upgrade-test-red.log` | **EXIT:101**, 35 errors (`Upgrade`, `PatternCell`, `decode_upgrade` absent) |
+| 2 | runtime tests | `cargo test --offline` | `sdk-test.log` | **29 passed**, 0 failed |
+| 3 | fmt + clippy | `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings` | `sdk-clippy.log` | `EXIT:0`, 0 warnings |
+| 4 | build determinism | `rm -f Cargo.lock && cargo horizon-mod build` twice | — | `cmp` identical, `4c9e6b33…a0971` both |
+| 5 | registry check | `cargo horizon-mod check pocketstorage.hmod` | `sdk-check.log` | `EXIT:0`, 40,212 B |
+| 6 | fits, own pin | `cargo horizon-mod fits … --build 0a875da` | `sdk-fits.log` | `0a875da  made for`, `EXIT:0` |
+| 7 | fits, older build | `cargo horizon-mod fits … --build 0b14f8a` | `sdk-fits-other.log`, `fits-other-FALSE-POSITIVE.md` | `EXIT:1` — tool false positive, proven |
+| 8 | data dialect | `python3 ports/tools/check_261_dialect.py pocketstorage.hmod` | run output | 4 recipe files, all 26.3 dialect |
+| 9 | package gate | `python3 ports/tools/verify-sdk-package.py pocketstorage` | run output | **1/1** |
+| 10 | in game | `launcher-game.sh build pocketstorage` + the leg | `pocketstorage-e2e/e2e-launcher.log` | **PASS + `EXIT:0`** (A–J) |
+| 11 | control | the leg with `GAME=<unmodded Nightly>` | `…/e2e-launcher-control.log` | **`EXIT:1`** |
+| 12 | selftest | `SELFTEST=1` | `…/e2e-launcher-selftest.log` | **`EXIT:1`** |
+| 13 | negative | `NEGATIVE=1` | `…/e2e-launcher-negative.log` | **`EXIT:1`** |
+| 14 | log checker | `check-e2e-logs.py pocketstorage-e2e --strict` | run output | `logs=4 ok=4` |
+| 15 | skills gate | `check-skills.py --notes ports/pocketstorage --strict` | run output | `SKILLS GATE: PASS` |
+
+Artifact: **`pocketstorage.hmod` 40,212 B
+`4c9e6b3330d130fc0d859bf796e6689be1857300143c0d9e4586a98a3a3a0971`**, 33 entries, no packed
+`Cargo.lock`.
+
+## The `.hnmod` slice 1 ladder (historical)
 
 Pin `1d63e0a5a37a7a708eb0b32b49bf0dfeb28ed8a9`, mixins
 `5a64af938ec86b00d53d16a408aabc0038fb3e57` (schema 6). Every build/test/e2e

@@ -18,13 +18,28 @@
 pub mod runtime;
 
 use mod_api::{
-    self, Command, CommandArgumentValue, CommandInvocation, CommandSource, Component, Direction,
-    Flow, Hand, Hooks, HostSide, HostTransaction, ITEMS, Identifier, ItemKey, ItemPlace,
-    ItemResource, ItemStack, LeftClickBlockEvent, PlayerRef, RegisterCommandsEvent,
-    RightClickBlockEvent, RunModCommandEvent, ServerHost, Tag, Text,
+    self, Command, CommandArgumentValue, CommandInvocation, CommandSource, Component, CraftingGrid,
+    CraftingRecipeCodec, CraftingRecipeKind, Direction, Flow, Hand, Hooks, HostSide,
+    HostTransaction, ITEMS, Identifier, ItemKey, ItemPlace, ItemResource, ItemStack,
+    LeftClickBlockEvent, LevelRef, PlayerRef, RegisterCommandsEvent, Registrar,
+    RegistrationContext, RightClickBlockEvent, RunModCommandEvent, ServerHost, Tag,
+    TagsUpdatedEvent, Text,
 };
 
-use crate::runtime::{Action, COMPONENT, Contents, Entry, Tier, is_unit, tier_of};
+use crate::runtime::{
+    Action, COMPONENT, Contents, Entry, Tier, container_allows_transfer, is_unit, tier_of,
+};
+
+/// What the unit says when the clicked container is locked against it.
+const LOCKED_MESSAGE: &str = "That container is locked";
+
+/// Whether the container at `pos` carries the vanilla lock (its item predicate, the rule the
+/// container's own open path asks). A block with no block entity, or an unloaded one, carries
+/// no lock here.
+fn container_locked(host: &dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> bool {
+    host.block_entity(level, pos)
+        .is_some_and(|entity| entity.lock(host).is_some())
+}
 
 /// The key of one saved slot's slot number.
 const KEY_SLOT: &str = "slot";
@@ -72,6 +87,26 @@ struct Mod;
 
 #[mod_api::horizon_mod]
 impl Hooks for Mod {
+    /// Before anything loads: register the upgrade crafting kind and resolve the item
+    /// ids it may name, so the three `pocketstorage:upgrade` recipe files are read by
+    /// this mod rather than refused as an unknown recipe type.
+    fn register(&self, registrar: &mut dyn Registrar, _context: &RegistrationContext) {
+        let keys = UPGRADE_ITEMS
+            .iter()
+            .map(|id| (*id, registrar.item_key(id)))
+            .collect();
+        registrar.register_crafting_recipe_serializer(UPGRADE_KIND, UpgradeKind { keys });
+    }
+
+    /// The merged tags were (re)published: the upgrade recipes' tag cells ask them at
+    /// craft time, when no host is available, so keep their members here.
+    fn tags_updated(&self, host: HostSide, _event: &mut TagsUpdatedEvent) {
+        match host {
+            HostSide::Server(host) => refresh_upgrade_tags(host),
+            HostSide::Client(host) => refresh_upgrade_tags(host),
+        }
+    }
+
     /// Before content loads: register the unit's component id, so a saved stack's
     /// `pocketstorage:contents` is a known, networked component.
     fn component_types(
@@ -164,6 +199,10 @@ fn deposit(host: &mut dyn ServerHost, click: &mod_api::BlockClick<'_>) -> bool {
     let Some(level) = player.level(&*host) else {
         return false;
     };
+    if !container_allows_transfer(container_locked(&*host, level, click.pos)) {
+        let _ = player.action_bar(host, Text::literal(LOCKED_MESSAGE));
+        return true;
+    }
     let side = direction_of(click.hit.face);
     // The clicked face's item handler, as upstream's `CapHelper.getItemHandler(world, pos, face)`.
     let Some(handler) = level.capability(host, &ITEMS, click.pos, Some(side)) else {
@@ -226,6 +265,10 @@ fn withdraw(host: &mut dyn ServerHost, pos: [i32; 3], face: [i32; 3]) -> bool {
     let Some(level) = player.level(&*host) else {
         return false;
     };
+    if !container_allows_transfer(container_locked(&*host, level, pos)) {
+        let _ = player.action_bar(host, Text::literal(LOCKED_MESSAGE));
+        return true;
+    }
     let side = direction_of(face);
     let Some(handler) = level.capability(host, &ITEMS, pos, Some(side)) else {
         return false;
@@ -545,9 +588,323 @@ fn direction_of(face: [i32; 3]) -> Direction {
     }
 }
 
+/// The upgrade family: the three `pocketstorage:upgrade` recipes, registered as a
+/// crafting kind because the pin has no fixed recipe type for them
+/// (`CraftingRecipeKind`, the same registration vanilla's own special recipes take).
+///
+/// The recipe is upstream's: a shaped 3×3 whose centre is the previous tier's unit,
+/// which rides its `pocketstorage:contents` onto the next tier's unit. Matching is
+/// pure and host-free, so the item keys an upgrade can name are resolved once at
+/// registration and the tags are cached whenever the game publishes them.
+const UPGRADE_KIND: &str = "upgrade";
+
+/// The item ids an upgrade recipe may name, resolved to keys at registration. A
+/// cell naming anything else refuses the recipe at load: the mod's three recipes
+/// are these and nothing else.
+const UPGRADE_ITEMS: [&str; 5] = [
+    "pocketstorage:psu_1",
+    "pocketstorage:psu_2",
+    "pocketstorage:psu_3",
+    "pocketstorage:psu_4",
+    "minecraft:piston",
+];
+
+/// The item tags the three upgrade recipes name, cached from `tags_updated`.
+const UPGRADE_TAGS: [&str; 4] = [
+    "c:ingots/gold",
+    "c:gems/diamond",
+    "c:chests",
+    "c:nether_stars",
+];
+
+/// The members of [`UPGRADE_TAGS`], as the last tag load published them. A craft-time
+/// match takes no host, so this is the only way a tag cell can be tested there.
+static UPGRADE_TAG_MEMBERS: std::sync::RwLock<Vec<(&'static str, Vec<ItemKey>)>> =
+    std::sync::RwLock::new(Vec::new());
+
+/// Whether `key` is in `tag` as the last tag load published it.
+fn in_upgrade_tag(tag: &str, key: ItemKey) -> bool {
+    let members = UPGRADE_TAG_MEMBERS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    members
+        .iter()
+        .any(|(name, keys)| *name == tag && keys.contains(&key))
+}
+
+/// Re-reads the upgrade recipes' tags from the game's merged tags.
+fn refresh_upgrade_tags(host: &dyn mod_api::Host) {
+    let mut loaded = Vec::with_capacity(UPGRADE_TAGS.len());
+    for tag in UPGRADE_TAGS {
+        let Some(id) = Identifier::parse(tag).ok() else {
+            continue;
+        };
+        let Some(key) = host.tags().key(&id) else {
+            continue;
+        };
+        let Some(members) = host.tags().items(key) else {
+            continue;
+        };
+        loaded.push((tag, members));
+    }
+    *UPGRADE_TAG_MEMBERS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = loaded;
+}
+
+/// The upgrade recipe as it crosses the API boundary: plain data, so the encoding
+/// is a `Wire` value and not a game type.
+#[derive(Clone, Debug, PartialEq, Eq, mod_api::Wire)]
+struct UpgradeValue {
+    /// The nine cells, row-major.
+    cells: Vec<UpgradeCell>,
+    /// The item the recipe makes.
+    result: String,
+}
+
+/// One cell of [`UpgradeValue`].
+#[derive(Clone, Debug, PartialEq, Eq, mod_api::Wire)]
+enum UpgradeCell {
+    /// Nothing in the cell.
+    Empty,
+    /// An item id.
+    Stack(String),
+    /// An item tag, without its `#`.
+    Tagged(String),
+}
+
+impl UpgradeValue {
+    /// The wire value of a decoded recipe.
+    fn of(upgrade: &runtime::Upgrade) -> Self {
+        let cells = upgrade
+            .cells()
+            .iter()
+            .map(|cell| match cell {
+                runtime::PatternCell::Empty => UpgradeCell::Empty,
+                runtime::PatternCell::Stack(id) => UpgradeCell::Stack(id.clone()),
+                runtime::PatternCell::Tagged(tag) => UpgradeCell::Tagged(tag.clone()),
+            })
+            .collect();
+        Self {
+            cells,
+            result: upgrade.result().to_owned(),
+        }
+    }
+
+    /// The pure recipe this value carries, or `None` when it is malformed (which the
+    /// decoder refuses, so this only happens to a hand-made value).
+    fn upgrade(&self) -> Option<runtime::Upgrade> {
+        let mut cells = Vec::with_capacity(self.cells.len());
+        for cell in &self.cells {
+            cells.push(match cell {
+                UpgradeCell::Empty => runtime::PatternCell::Empty,
+                UpgradeCell::Stack(id) => runtime::PatternCell::Stack(id.clone()),
+                UpgradeCell::Tagged(tag) => runtime::PatternCell::Tagged(tag.clone()),
+            });
+        }
+        let cells: [runtime::PatternCell; 9] = cells.try_into().ok()?;
+        runtime::Upgrade::new(cells, &self.result).ok()
+    }
+}
+
+/// The registered `pocketstorage:upgrade` kind, with the item keys it may name.
+struct UpgradeKind {
+    /// Every id in [`UPGRADE_ITEMS`], in order.
+    keys: Vec<(&'static str, ItemKey)>,
+}
+
+impl UpgradeKind {
+    /// The key of one of the item ids an upgrade may name.
+    fn key(&self, id: &str) -> Option<ItemKey> {
+        self.keys
+            .iter()
+            .find(|(name, _)| *name == id)
+            .map(|(_, key)| *key)
+    }
+}
+
+impl CraftingRecipeKind for UpgradeKind {
+    type Value = UpgradeValue;
+
+    fn codec(&self) -> Option<CraftingRecipeCodec<Self::Value>> {
+        Some(CraftingRecipeCodec::wire())
+    }
+
+    fn decode(&self, json: &str) -> Result<Self::Value, String> {
+        decode_upgrade(json).map(|upgrade| UpgradeValue::of(&upgrade))
+    }
+
+    fn write(&self, value: &Self::Value) -> Result<String, String> {
+        let Some(upgrade) = value.upgrade() else {
+            return Err("the upgrade value is not a recipe".to_owned());
+        };
+        Ok(write_upgrade(&upgrade))
+    }
+
+    fn matches(&self, value: &Self::Value, grid: CraftingGrid) -> bool {
+        if (grid.width, grid.height) != (3, 3) || grid.cells.len() != 9 {
+            return false;
+        }
+        let Some(upgrade) = value.upgrade() else {
+            return false;
+        };
+        let mut keys: [Option<ItemKey>; 9] = [None; 9];
+        for (slot, cell) in grid.cells.iter().enumerate() {
+            keys[slot] = cell.as_ref().map(ItemStack::item);
+        }
+        upgrade.matches(&keys, |id| self.key(id), in_upgrade_tag)
+    }
+
+    fn assemble(&self, value: &Self::Value, grid: CraftingGrid) -> Option<ItemStack> {
+        if (grid.width, grid.height) != (3, 3) {
+            return None;
+        }
+        let upgrade = value.upgrade()?;
+        let key = self.key(upgrade.result())?;
+        let unit = grid.cells.get(upgrade.unit_cell())?.as_ref()?;
+        let mut out = ItemStack::new(key, 1)?;
+        // Upstream's `UpgradeRecipe` builds the next tier's unit and copies the old
+        // unit's own data onto it: what the unit held rides along, nothing else does.
+        out.copy_component_from(unit, COMPONENT);
+        Some(out)
+    }
+}
+
+/// Reads a `pocketstorage:upgrade` file: the jar's shaped pattern, with 26.3's
+/// ingredients. The engine hands this the object with its `type` removed, so an
+/// absent type is accepted and a wrong one refused.
+pub(crate) fn decode_upgrade(json: &str) -> Result<runtime::Upgrade, String> {
+    use mod_api::serde_json::Value;
+
+    let value: Value = mod_api::serde_json::from_str(json).map_err(|error| error.to_string())?;
+    if let Some(kind) = value.get("type").and_then(Value::as_str)
+        && kind != format!("pocketstorage:{UPGRADE_KIND}")
+    {
+        return Err(format!("{kind} is not a pocketstorage upgrade"));
+    }
+    let rows = value
+        .get("pattern")
+        .and_then(Value::as_array)
+        .ok_or("an upgrade needs a pattern")?;
+    if rows.len() != 3 {
+        return Err(format!("an upgrade pattern is 3 rows, not {}", rows.len()));
+    }
+    let ingredients = value
+        .get("key")
+        .and_then(Value::as_object)
+        .ok_or("an upgrade needs a key")?;
+    let mut cells = Vec::with_capacity(9);
+    for row in rows {
+        let row = row.as_str().ok_or("a pattern row is a string")?;
+        if row.chars().count() != 3 {
+            return Err(format!("a pattern row is 3 letters, not {row:?}"));
+        }
+        for letter in row.chars() {
+            if letter == ' ' {
+                cells.push(runtime::PatternCell::Empty);
+                continue;
+            }
+            let written = ingredients
+                .get(&letter.to_string())
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("the pattern names '{letter}', the key does not"))?;
+            cells.push(runtime::PatternCell::from_ingredient(written)?);
+        }
+    }
+    let cells: [runtime::PatternCell; 9] = cells
+        .try_into()
+        .map_err(|_| "an upgrade pattern is 3×3".to_owned())?;
+    let result = value
+        .get("result")
+        .and_then(|result| {
+            result
+                .get("id")
+                .and_then(Value::as_str)
+                .or_else(|| result.as_str())
+        })
+        .ok_or("an upgrade needs a result item")?;
+    runtime::Upgrade::new(cells, result)
+}
+
+/// Writes an upgrade back as the recipe file it came from, for client sync.
+fn write_upgrade(upgrade: &runtime::Upgrade) -> String {
+    use mod_api::serde_json::{Map, Value};
+
+    let mut letters: Vec<(runtime::PatternCell, char)> = Vec::new();
+    let mut rows: Vec<Value> = Vec::with_capacity(3);
+    for row in 0..3 {
+        let mut line = String::with_capacity(3);
+        for column in 0..3 {
+            let cell = &upgrade.cells()[row * 3 + column];
+            if matches!(cell, runtime::PatternCell::Empty) {
+                line.push(' ');
+                continue;
+            }
+            let letter = match letters.iter().find(|(known, _)| known == cell) {
+                Some((_, letter)) => *letter,
+                None => {
+                    let letter = char::from(b'A' + u8::try_from(letters.len()).unwrap_or(0));
+                    letters.push((cell.clone(), letter));
+                    letter
+                }
+            };
+            line.push(letter);
+        }
+        rows.push(Value::String(line));
+    }
+    let mut key = Map::new();
+    for (cell, letter) in &letters {
+        if let Some(ingredient) = cell.ingredient() {
+            key.insert(letter.to_string(), Value::String(ingredient));
+        }
+    }
+    let mut result = Map::new();
+    result.insert("id".to_owned(), Value::String(upgrade.result().to_owned()));
+    result.insert("count".to_owned(), Value::from(1));
+    let object = Map::from_iter([
+        (
+            "type".to_owned(),
+            Value::String(format!("pocketstorage:{UPGRADE_KIND}")),
+        ),
+        ("pattern".to_owned(), Value::Array(rows)),
+        ("key".to_owned(), Value::Object(key)),
+        ("result".to_owned(), Value::Object(result)),
+    ]);
+    Value::Object(object).to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::take_place_of;
+    use super::{decode_upgrade, take_place_of, write_upgrade};
+
+    #[test]
+    fn an_upgrade_value_round_trips_through_the_wire_form() {
+        // The kind's value crosses the API boundary as `UpgradeValue`, so the write
+        // and decode halves must agree; a recipe the client cannot read back would
+        // be a silent gap in the sync.
+        let file = include_str!("../data/pocketstorage/recipe/tier2.json");
+        let upgrade = decode_upgrade(file).expect("the shipped tier-2 recipe");
+        let value = super::UpgradeValue::of(&upgrade);
+        let written = write_upgrade(&value.upgrade().expect("a runtime recipe"));
+        let again = decode_upgrade(&written).expect("the written recipe decodes");
+        assert_eq!(again, upgrade);
+    }
+
+    #[test]
+    fn a_recipe_naming_something_the_kind_cannot_resolve_is_refused() {
+        // Upstream's tier-2 recipe with a different corner item: the pattern still
+        // decodes, but the item is not one the kind resolved, so nothing may match
+        // it. This is the data-side guard behind `UPGRADE_ITEMS`.
+        let file = include_str!("../data/pocketstorage/recipe/tier2.json");
+        assert!(decode_upgrade(file).is_ok());
+        let wrong = file.replace("#c:ingots/gold", "minecraft:emerald");
+        assert!(
+            decode_upgrade(&wrong).is_ok(),
+            "an emerald pattern is still a well-formed upgrade recipe"
+        );
+        // ... but its corners resolve to no key, which the match path treats as a
+        // refusal (the unit tests of `Upgrade::matches` cover that).
+    }
 
     #[test]
     fn only_the_main_inventory_and_the_off_hand_are_places_put_takes_from() {

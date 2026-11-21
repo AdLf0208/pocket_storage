@@ -1,6 +1,6 @@
 id = "pocketstorage"
 name = "Pocket Storage"
-version = "0.2.0"
+version = "0.2.5"
 description = """A port of Pocket Storage for Horizon: a tiered item that carries its own
 inventory. Tier 1 holds 8 kinds of item with up to 255 of each (tiers 2-4 are 16 x 4095,
 32 x 65535 and 64 x 1048575). Sneak + right-click a container deposits all but one of each
@@ -21,5 +21,5 @@ capabilities = ["registries"]
 
 [native]
 game = "26.3"
-horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+horizon = "0a875da91dbb0fdcb7ba8c42c11341aa229af51a"
 mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"

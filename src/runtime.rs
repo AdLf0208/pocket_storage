@@ -65,6 +65,13 @@ pub fn tier_of(item: &str) -> Option<Tier> {
 
 /// Whether an item id is one of the mod's storage units.
 #[must_use]
+/// Whether a deposit or withdraw may touch a container. The unit's transfers go through the
+/// block's automation capability, which bypasses the player-facing lock, so a container that
+/// carries one is refused: the player would otherwise reach inside a chest they cannot open.
+pub fn container_allows_transfer(locked: bool) -> bool {
+    !locked
+}
+
 pub fn is_unit(item: &str) -> bool {
     tier_of(item).is_some()
 }
@@ -312,6 +319,159 @@ impl Contents {
     }
 }
 
+/// One cell of an upgrade recipe's 3×3 pattern: nothing, an item, or an item tag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PatternCell {
+    /// The cell must be empty.
+    Empty,
+    /// The cell must hold this item id.
+    Stack(String),
+    /// The cell must hold an item of this tag (a `#c:chests`-style name, no `#`).
+    Tagged(String),
+}
+
+impl PatternCell {
+    /// A cell from a recipe file's ingredient: `#c:chests` is a tag, anything else
+    /// an item id. Both need a namespace, as 26.3's own data does.
+    pub fn from_ingredient(text: &str) -> Result<Self, String> {
+        let text = text.trim();
+        let (tag, name) = match text.strip_prefix('#') {
+            Some(name) => (true, name),
+            None => (false, text),
+        };
+        match name.split_once(':') {
+            Some((namespace, path)) if !namespace.is_empty() && !path.is_empty() => Ok(if tag {
+                Self::Tagged(name.to_owned())
+            } else {
+                Self::Stack(name.to_owned())
+            }),
+            _ => Err(format!(
+                "{text} is not a namespaced {}",
+                if tag { "tag" } else { "item id" }
+            )),
+        }
+    }
+
+    /// The ingredient as the recipe file writes it: `#` for a tag.
+    #[must_use]
+    pub fn ingredient(&self) -> Option<String> {
+        match self {
+            Self::Empty => None,
+            Self::Stack(id) => Some(id.clone()),
+            Self::Tagged(tag) => Some(format!("#{tag}")),
+        }
+    }
+}
+
+/// A `pocketstorage:upgrade` recipe: a 3×3 shaped pattern with exactly one cell
+/// naming the unit it upgrades, whose result is that unit's next tier. The unit
+/// keeps what it holds (the ingredient's `pocketstorage:contents` rides onto the
+/// result); that part is the glue's, and the rule here is which grid it accepts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Upgrade {
+    cells: [PatternCell; 9],
+    result: String,
+    unit_cell: usize,
+}
+
+impl Upgrade {
+    /// The recipe the pattern declares, or the reason it is not an upgrade.
+    ///
+    /// Upstream's `UpgradeRecipe` is a shaped recipe whose one unit ingredient is a
+    /// tier and whose result is the next: exactly one cell must name a unit, that
+    /// unit must have a next tier, and the result must be that tier's item.
+    pub fn new(cells: [PatternCell; 9], result: &str) -> Result<Self, String> {
+        let mut unit = None;
+        for (index, cell) in cells.iter().enumerate() {
+            let PatternCell::Stack(id) = cell else {
+                continue;
+            };
+            if !is_unit(id) {
+                continue;
+            }
+            if let Some(previous) = unit {
+                return Err(format!("two units in one upgrade ({previous} and {index})"));
+            }
+            unit = Some(index);
+        }
+        let Some(unit_cell) = unit else {
+            return Err("an upgrade recipe names no storage unit".to_owned());
+        };
+        let PatternCell::Stack(unit) = &cells[unit_cell] else {
+            unreachable!("the unit cell was found as an item");
+        };
+        let tier = tier_of(unit).ok_or_else(|| format!("{unit} is not a storage unit"))?;
+        let next = TIERS
+            .iter()
+            .position(|known| known.item == tier.item)
+            .and_then(|index| TIERS.get(index + 1))
+            .ok_or_else(|| format!("{unit} is the highest tier"))?;
+        if next.item != result {
+            return Err(format!(
+                "an upgrade of {unit} makes {}, not {result}",
+                next.item
+            ));
+        }
+        Ok(Self {
+            cells,
+            result: result.to_owned(),
+            unit_cell,
+        })
+    }
+
+    /// The nine cells, row-major.
+    #[must_use]
+    pub fn cells(&self) -> &[PatternCell; 9] {
+        &self.cells
+    }
+
+    /// The item the recipe makes.
+    #[must_use]
+    pub fn result(&self) -> &str {
+        &self.result
+    }
+
+    /// The cell the unit ingredient is in.
+    #[must_use]
+    pub fn unit_cell(&self) -> usize {
+        self.unit_cell
+    }
+
+    /// The unit item the recipe upgrades.
+    #[must_use]
+    pub fn unit(&self) -> &str {
+        match &self.cells[self.unit_cell] {
+            PatternCell::Stack(id) => id,
+            _ => unreachable!("a recipe is built with a unit in its unit cell"),
+        }
+    }
+
+    /// Whether `grid` is this recipe's pattern. The caller resolves an item id to
+    /// the key the grid holds (`resolve`) and answers tag membership (`in_tag`),
+    /// because a craft-time match has no host to ask the registries.
+    #[must_use]
+    pub fn matches<Key: Copy + Eq>(
+        &self,
+        grid: &[Option<Key>; 9],
+        resolve: impl Fn(&str) -> Option<Key>,
+        in_tag: impl Fn(&str, Key) -> bool,
+    ) -> bool {
+        self.cells
+            .iter()
+            .zip(grid)
+            .all(|(cell, here)| match (cell, here) {
+                (PatternCell::Empty, None) => true,
+                (PatternCell::Empty, Some(_)) => false,
+                (PatternCell::Stack(id), Some(key)) => {
+                    resolve(id).is_some_and(|wanted| wanted == *key)
+                }
+                (PatternCell::Stack(_), None) => false,
+                (PatternCell::Tagged(tag), Some(key)) => in_tag(tag, *key),
+                (PatternCell::Tagged(_), None) => false,
+            })
+    }
+}
+
 /// The command a line asks for (`/psu …`), as the mod's command fallback for
 /// the screen this slice does not carry.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -374,6 +534,15 @@ mod tests {
                 .iter()
                 .map(|(slot, item, count)| (*slot, Entry::new(item, *count))),
         )
+    }
+
+    #[test]
+    fn a_locked_container_refuses_the_transfer_a_player_could_not_make() {
+        // The deposit and the withdraw use the sided automation capability, which does not
+        // ask the lock; a locked chest is therefore refused explicitly, so the unit cannot
+        // take from or put into a container its owner locked.
+        assert!(container_allows_transfer(false));
+        assert!(!container_allows_transfer(true));
     }
 
     #[test]
@@ -690,5 +859,225 @@ mod tests {
             assert_eq!(unit.len(), tier.slots);
             assert_eq!(unit.slots().count(), 0);
         }
+    }
+
+    // The upgrade family: `pocketstorage:upgrade` is a shaped 3×3 recipe whose
+    // central cell is the previous tier's unit and whose result is the next tier,
+    // keeping what the unit holds. The rule is pure: who is in the grid is a key
+    // the caller resolves, and a tag cell asks the caller whether a key is a member.
+
+    /// The jar's tier-2 recipe as a pattern: gold in the corners, pistons above and
+    /// below, chests left and right, the unit in the centre.
+    fn tier2_pattern(unit: &str) -> [PatternCell; 9] {
+        [
+            PatternCell::Tagged("c:ingots/gold".to_owned()),
+            PatternCell::Stack("minecraft:piston".to_owned()),
+            PatternCell::Tagged("c:ingots/gold".to_owned()),
+            PatternCell::Tagged("c:chests".to_owned()),
+            PatternCell::Stack(unit.to_owned()),
+            PatternCell::Tagged("c:chests".to_owned()),
+            PatternCell::Tagged("c:ingots/gold".to_owned()),
+            PatternCell::Stack("minecraft:piston".to_owned()),
+            PatternCell::Tagged("c:ingots/gold".to_owned()),
+        ]
+    }
+
+    /// Each ingredient as a key: 1 = gold, 2 = piston, 3 = chest, 10 = unit.
+    fn tier2_grid(corner: u32, middle: u32, unit: u32) -> [Option<u32>; 9] {
+        [
+            Some(corner),
+            Some(2),
+            Some(corner),
+            Some(middle),
+            Some(unit),
+            Some(middle),
+            Some(corner),
+            Some(2),
+            Some(corner),
+        ]
+    }
+
+    #[test]
+    fn an_upgrade_recipe_is_the_next_tier_and_refuses_anything_else() {
+        let recipe = Upgrade::new(tier2_pattern(TIER1.item), TIER2.item)
+            .expect("the jar's tier-2 shape is an upgrade");
+        assert_eq!(recipe.unit(), TIER1.item);
+        assert_eq!(recipe.result(), TIER2.item);
+        assert_eq!(recipe.unit_cell(), 4, "the unit is the centre cell");
+
+        assert!(
+            Upgrade::new(tier2_pattern(TIER1.item), TIER1.item).is_err(),
+            "an upgrade from a tier to itself is not one"
+        );
+        assert!(
+            Upgrade::new(tier2_pattern(TIER1.item), TIER3.item).is_err(),
+            "an upgrade skips no tier"
+        );
+        assert!(
+            Upgrade::new(tier2_pattern(TIER3.item), TIER2.item).is_err(),
+            "an upgrade is never downward"
+        );
+        assert!(
+            Upgrade::new(tier2_pattern(TIER4.item), TIER4.item).is_err(),
+            "tier 4 has no next tier"
+        );
+        let mut no_unit = tier2_pattern(TIER1.item);
+        no_unit[4] = PatternCell::Stack("minecraft:diamond".to_owned());
+        assert!(
+            Upgrade::new(no_unit, TIER2.item).is_err(),
+            "a recipe whose centre is not a unit cannot upgrade"
+        );
+        let mut two_units = tier2_pattern(TIER1.item);
+        two_units[0] = PatternCell::Stack(TIER1.item.to_owned());
+        assert!(
+            Upgrade::new(two_units, TIER2.item).is_err(),
+            "a recipe with two units is ambiguous"
+        );
+    }
+
+    #[test]
+    fn an_upgrade_matches_only_its_own_pattern() {
+        let recipe = Upgrade::new(tier2_pattern(TIER1.item), TIER2.item).unwrap();
+        let resolve = |id: &str| match id {
+            "minecraft:piston" => Some(2_u32),
+            "pocketstorage:psu_1" => Some(10),
+            "pocketstorage:psu_2" => Some(11),
+            _ => None,
+        };
+        let in_tag = |tag: &str, key: u32| match tag {
+            "c:ingots/gold" => key == 1,
+            "c:chests" => key == 3,
+            _ => false,
+        };
+        assert!(
+            recipe.matches(&tier2_grid(1, 3, 10), resolve, in_tag),
+            "the jar's pattern matches"
+        );
+        assert!(
+            !recipe.matches(&tier2_grid(1, 3, 11), resolve, in_tag),
+            "a tier-2 unit is not the tier-1 ingredient"
+        );
+        assert!(
+            !recipe.matches(&tier2_grid(4, 3, 10), resolve, in_tag),
+            "a corner that is not gold refuses the recipe"
+        );
+        assert!(
+            !recipe.matches(&tier2_grid(1, 4, 10), resolve, in_tag),
+            "a side that is not a chest refuses the recipe"
+        );
+        let mut hole = tier2_grid(1, 3, 10);
+        hole[8] = None;
+        assert!(
+            !recipe.matches(&hole, resolve, in_tag),
+            "a missing ingredient refuses the recipe"
+        );
+        assert!(
+            !recipe.matches(&tier2_grid(1, 3, 10), |_| None::<u32>, |_, _| false),
+            "with no item resolved and no tag loaded nothing matches"
+        );
+    }
+
+    #[test]
+    fn a_tag_cell_asks_membership_and_an_item_cell_does_not() {
+        let recipe = Upgrade::new(tier2_pattern(TIER1.item), TIER2.item).unwrap();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let resolve = |id: &str| match id {
+            "minecraft:piston" => Some(2_u32),
+            _ => None,
+        };
+        let in_tag = |tag: &str, key: u32| {
+            asked.borrow_mut().push(tag.to_owned());
+            // Gold arrives under both the convention tag and vanilla's own, which is
+            // the compatibility the campaign rule asks for: either answer accepts it.
+            (tag == "c:ingots/gold" && key == 1) || (tag == "minecraft:gold_ingots" && key == 1)
+        };
+        let mut unit = tier2_grid(1, 3, 10);
+        unit[4] = Some(10);
+        // The unit cell is an item cell, so it never reaches the tag lookup.
+        assert!(
+            !recipe.matches(&unit, resolve, in_tag),
+            "the unit does not resolve"
+        );
+        let asks = asked.borrow();
+        assert!(asks.iter().any(|tag| tag == "c:ingots/gold"));
+        assert!(
+            !asks.iter().any(|tag| tag.contains("psu")),
+            "the unit cell is an item, not a tag: {asks:?}"
+        );
+    }
+
+    #[test]
+    fn the_shipped_upgrade_recipes_are_the_jars_three() {
+        let tier2 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier2.json"))
+            .expect("tier2.json is a valid upgrade recipe");
+        assert_eq!((tier2.unit(), tier2.result()), (TIER1.item, TIER2.item));
+        assert_eq!(tier2.unit_cell(), 4);
+
+        let tier3 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier3.json"))
+            .expect("tier3.json is a valid upgrade recipe");
+        assert_eq!((tier3.unit(), tier3.result()), (TIER2.item, TIER3.item));
+
+        let tier4 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier4.json"))
+            .expect("tier4.json is a valid upgrade recipe");
+        assert_eq!((tier4.unit(), tier4.result()), (TIER3.item, TIER4.item));
+    }
+
+    #[test]
+    fn the_upgrade_files_name_the_jars_ingredients() {
+        // Upstream's three upgrades: tiers 2 and 3 put the tier's material in the
+        // corners, a piston above and below and chests left and right; tier 4 turns
+        // the shape around (pistons in the corners, chests above and below, nether
+        // stars on the sides). The unit is always the centre.
+        let tier2 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier2.json"))
+            .expect("a shipped upgrade");
+        let tier3 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier3.json"))
+            .expect("a shipped upgrade");
+        let tier4 = crate::decode_upgrade(include_str!("../data/pocketstorage/recipe/tier4.json"))
+            .expect("a shipped upgrade");
+        for (recipe, corner, middle, side) in [
+            (tier2, "#c:ingots/gold", "minecraft:piston", "#c:chests"),
+            (tier3, "#c:gems/diamond", "minecraft:piston", "#c:chests"),
+            (tier4, "minecraft:piston", "#c:chests", "#c:nether_stars"),
+        ] {
+            let cells = recipe.cells();
+            let corner = PatternCell::from_ingredient(corner).unwrap();
+            let middle = PatternCell::from_ingredient(middle).unwrap();
+            let side = PatternCell::from_ingredient(side).unwrap();
+            for index in [0, 2, 6, 8] {
+                assert_eq!(
+                    cells[index],
+                    corner,
+                    "corner {index} of {}",
+                    recipe.result()
+                );
+            }
+            for index in [1, 7] {
+                assert_eq!(
+                    cells[index],
+                    middle,
+                    "middle {index} of {}",
+                    recipe.result()
+                );
+            }
+            for index in [3, 5] {
+                assert_eq!(cells[index], side, "side {index} of {}", recipe.result());
+            }
+            assert_eq!(cells[4], PatternCell::Stack(recipe.unit().to_owned()));
+        }
+    }
+
+    #[test]
+    fn the_tier_one_recipe_is_264s_ingredient_form() {
+        // A carried recipe written in 1.21.1's object form (`{"item": …}`) never
+        // crafts at 26.3 (measured, ARCHITECTURE.md §3): the tier-1 recipe must name
+        // bare ids and `#tags` in its key, and it must be the jar's 3×3 shape.
+        let file = include_str!("../data/pocketstorage/recipe/tier1.json");
+        assert!(
+            !file.contains("\"item\"") && !file.contains("\"tag\""),
+            "the tier-1 recipe uses the 26.3 ingredient form, not 1.21.1's object form"
+        );
+        assert!(file.contains("\"#c:ingots/iron\""));
+        assert!(file.contains("minecraft:crafting_shaped"));
+        assert!(file.contains("\"ABA\"") && file.contains("\"CDC\""));
     }
 }
